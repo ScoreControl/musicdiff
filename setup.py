@@ -60,6 +60,14 @@ if __name__ == '__main__':
 
         packages=find_packages(),
 
+        entry_points={
+            'console_scripts': [
+                'score-diff=musicdiff.__main__:main',
+                'score-extract=musicdiff.musescore.extract:main',
+                'score-merge=musicdiff.merge.__main__:main',
+            ],
+        },
+
         python_requires='>=3.12',
 
         install_requires=[

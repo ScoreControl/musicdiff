@@ -875,11 +875,25 @@ class M21Utils:
             list(measure.recurse().getElementsByClass(m21.harmony.ChordSymbol))
         )
 
+        # music21 places a Part's primary Instrument directly on the Part stream rather
+        # than inside its first Measure. Include part-level Instruments on the first
+        # measure so part instrumentation changes are tracked alongside mid-score ones.
+        part_level_instruments: list[m21.instrument.Instrument] = []
+        if DetailLevel.includesInstruments(detail):
+            first_measure = part.getElementsByClass(m21.stream.Measure).first()
+            if first_measure is measure:
+                part_level_instruments = list(
+                    part.getElementsByClass(m21.instrument.Instrument)
+                )
+
         # Sort the initialList by offset in measure, so we can see which clefs are
         # duplicates from different voices. We use el.musicdiff_offset_in_measure
         # later, so compute it even if list is of length 1.
         for el in initialList:
             el.musicdiff_offset_in_measure = el.getOffsetInHierarchy(measure)  # type: ignore
+        for inst in part_level_instruments:
+            inst.musicdiff_offset_in_measure = 0.0  # type: ignore
+            initialList.append(inst)
         if len(initialList) > 1:
             initialList.sort(key=lambda el: el.musicdiff_offset_in_measure)  # type: ignore
 
@@ -891,10 +905,7 @@ class M21Utils:
         # since they are non-printed.  We also try to de-duplicate redundant clefs.
         mostRecentClef: m21.clef.Clef | None = None
         for el in initialList:
-            if isinstance(el, m21.instrument.Instrument):
-                if not DetailLevel.includesDirections(detail):
-                    continue
-            elif not DetailLevel.objIsIncluded(el, detail):
+            if not DetailLevel.objIsIncluded(el, detail):
                 # ignore objects that were not requested
                 continue
 
@@ -1260,7 +1271,9 @@ class M21Utils:
             return M21Utils.clef_to_infodict(extra, kind, detail)
 
         if kind == 'instrument':
-            return{}
+            if t.TYPE_CHECKING:
+                assert isinstance(extra, m21.instrument.Instrument)
+            return M21Utils.instrument_to_infodict(extra, kind, detail)
         
         if kind == 'timesig':
             if t.TYPE_CHECKING:
@@ -1393,9 +1406,15 @@ class M21Utils:
             # we also ignore duration for endings (RepeatBrackets).  We count how many measures
             # instead.  Several other things just don't have duration (timesig, dynamic, etc).
             # Note that 'dynamic' does not include 'crescendo' and 'diminuendo', just 'fff' et al.
-            offset = extra.getOffsetInHierarchy(measure)
+            try:
+                offset = extra.getOffsetInHierarchy(measure)
+            except m21.sites.SitesException:
+                offset = getattr(extra, 'musicdiff_offset_in_measure', 0.0)
         else:
-            offset = extra.getOffsetInHierarchy(measure)
+            try:
+                offset = extra.getOffsetInHierarchy(measure)
+            except m21.sites.SitesException:
+                offset = getattr(extra, 'musicdiff_offset_in_measure', 0.0)
             duration = extra.duration.quarterLength
 
         return offset, duration
@@ -2209,18 +2228,22 @@ class M21Utils:
         return {}
 
     @staticmethod
+    def _glissando_endpoint_label(el: m21.base.Music21Object) -> str:
+        if isinstance(el, m21.note.Note) and el.pitch is not None:
+            return el.pitch.nameWithOctave
+        if isinstance(el, m21.chord.Chord) and el.pitches:
+            return ','.join(p.nameWithOctave for p in el.pitches)
+        if hasattr(el, 'pitch') and el.pitch is not None:
+            return str(el.pitch)
+        return str(el)
+
+    @staticmethod
     def glissando_to_string(
         glissando: m21.spanner.Glissando,
         kind: str,
         detail: DetailLevel | int
     ) -> str | None:
-        if len(glissando) < 2:
-            return None
-
-        start = glissando[0]
-        end = glissando[-1]
-
-        return f'{start} -> {end}'
+        return None
 
     @staticmethod
     def glissando_to_symbolic(
@@ -2231,28 +2254,29 @@ class M21Utils:
         if len(glissando) < 2:
             return None
 
-        start = glissando[0]
-        end = glissando[-1]
-
+        start = M21Utils._glissando_endpoint_label(glissando[0])
+        end = M21Utils._glissando_endpoint_label(glissando[-1])
         return f'{start} -> {end}'
-    
+
     @staticmethod
     def glissando_to_infodict(
         glissando: m21.spanner.Glissando,
         kind: str,
         detail: DetailLevel | int
-    ) -> str | None:
+    ) -> dict[str, str]:
         if len(glissando) < 2:
-            return None
+            return {}
 
-        start = glissando[0]
-        end = glissando[-1]
-
-        return {
-            'startpitch': str(start.pitch) if hasattr(start, 'pitch') else str(start),
-            'endpitch': str(end.pitch) if hasattr(end, 'pitch') else str(end),
-            'linetype': str(glissando.lineType),
+        start = M21Utils._glissando_endpoint_label(glissando[0])
+        end = M21Utils._glissando_endpoint_label(glissando[-1])
+        info: dict[str, str] = {
+            'startpitch': start,
+            'endpitch': end,
+            'linetype': str(glissando.lineType or ''),
         }
+        if getattr(glissando, 'label', None):
+            info['label'] = str(glissando.label)
+        return info
 
     @staticmethod
     def arpeggio_to_string(
@@ -2459,6 +2483,14 @@ class M21Utils:
         return {}
 
     @staticmethod
+    def instrument_to_string(
+        inst: m21.instrument.Instrument,
+        kind: str,
+        detail: DetailLevel | int
+    ) -> str | None:
+        return None
+
+    @staticmethod
     def instrument_to_symbolic(
         inst: m21.instrument.Instrument,
         kind: str,
@@ -2469,6 +2501,24 @@ class M21Utils:
             name = f'program {inst.midiProgram}'
         return name or None
 
+    @staticmethod
+    def instrument_to_infodict(
+        inst: m21.instrument.Instrument,
+        kind: str,
+        detail: DetailLevel | int
+    ) -> dict[str, str]:
+        info: dict[str, str] = {}
+        if inst.partName:
+            info['partName'] = inst.partName.strip()
+        if inst.instrumentAbbreviation:
+            info['abbreviation'] = inst.instrumentAbbreviation.strip()
+        if inst.midiProgram is not None:
+            info['midiProgram'] = str(inst.midiProgram)
+        if inst.midiChannel is not None:
+            info['midiChannel'] = str(inst.midiChannel)
+        if inst.transposition is not None:
+            info['transposition'] = str(inst.transposition.directedName)
+        return info
 
     @staticmethod
     def extra_to_string(
@@ -2488,8 +2538,8 @@ class M21Utils:
             return M21Utils.dynamic_to_string(extra, kind, detail)
         if isinstance(extra, m21.clef.Clef):
             return M21Utils.clef_to_string(extra, kind, detail)
-        
-        #TODO: Add instrument
+        if isinstance(extra, m21.instrument.Instrument):
+            return M21Utils.instrument_to_string(extra, kind, detail)
 
 
         if isinstance(extra, m21.meter.TimeSignature):

@@ -83,13 +83,17 @@ class DetailLevel(IntEnum):
     # will be found.
     LyricIdentifiers = 1 << 15
 
-    #Glissandos, straight lines / wavy lines
+    # Glissandos, straight lines / wavy lines
     Glissandos = 1 << 20
+
+    # Instruments (part instruments and mid-score instrument changes)
+    Instruments = 1 << 21
 
     # other objects (everything above that isn't in DecoratedNotesAndRests)
     OtherObjects = (
         Signatures | Directions | Barlines | StaffDetails
-        | ChordSymbols | Ottavas | Arpeggios | Lyrics | LyricIdentifiers | Glissandos
+        | ChordSymbols | Ottavas | Arpeggios | Lyrics | LyricIdentifiers
+        | Glissandos | Instruments
     )
 
     # all objects = decorated notes and other musical objects
@@ -209,7 +213,9 @@ class DetailLevel(IntEnum):
     def includesGlissandos(cls, val: int) -> bool:
         return val & cls.Glissandos != 0
 
-    
+    @classmethod
+    def includesInstruments(cls, val: int) -> bool:
+        return val & cls.Instruments != 0
 
     @classmethod
     def _included_m21_types(cls, val: int) -> tuple[t.Type, ...]:
@@ -230,6 +236,12 @@ class DetailLevel(IntEnum):
 
             if cls.includesSlurs(val):
                 typesList.append(m21.spanner.Slur)
+
+            if cls.includesGlissandos(val):
+                typesList.append(m21.spanner.Glissando)
+
+            if cls.includesInstruments(val):
+                typesList.append(m21.instrument.Instrument)
 
             if cls.includesSignatures(val):
                 typesList.extend([

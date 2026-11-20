@@ -19,6 +19,8 @@ import re
 import typing as t
 from pathlib import Path
 
+from dataclasses import dataclass, field
+
 import music21 as m21
 import converter21
 
@@ -29,6 +31,28 @@ from musicdiff.comparison import Comparison
 from musicdiff.comparison import EvaluationMetrics
 from musicdiff.comparison import DiffOperation
 from musicdiff.visualization import Visualization
+from musicdiff.musescore import (
+    AudioDiffResult,
+    MUSESCORE_EXTENSIONS,
+    MetaDiffResult,
+    MuseScoreArchive,
+    configure_music21_musescore,
+    diff_audio_settings,
+    diff_musescore_metadata,
+    export_musicxml,
+    extract_audio_settings,
+    extract_metadata,
+    find_musescore_binary,
+    format_audio_diff,
+    format_meta_diff,
+    resolve_to_musicxml,
+)
+from musicdiff.merge import (
+    MergeConflict,
+    MergeResult,
+    cherry_pick_scores,
+    merge_scores,
+)
 
 def _getInputExtensionsList() -> list[str]:
     c = m21.converter.Converter()
@@ -136,10 +160,17 @@ def diff(
     if isinstance(score1, Path):
         if not score1Name:
             score1Name = score1
+        if score1.suffix.lower() in MUSESCORE_EXTENSIONS:
+            try:
+                score1 = resolve_to_musicxml(score1)
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                print(f'score1 ({score1Name}) could not be exported from MuseScore', file=sys.stderr)
+                print(e, file=sys.stderr)
+                badArg1 = True
         fileName1 = score1.name
         fileExt1 = score1.suffix
 
-        if fileExt1 not in _getInputExtensionsList():
+        if not badArg1 and fileExt1 not in _getInputExtensionsList():
             print(f'score1 file extension ({fileExt1}) not supported by music21.', file=sys.stderr)
             badArg1 = True
 
@@ -164,10 +195,17 @@ def diff(
     if isinstance(score2, Path):
         if not score2Name:
             score2Name = score2
+        if score2.suffix.lower() in MUSESCORE_EXTENSIONS:
+            try:
+                score2 = resolve_to_musicxml(score2)
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                print(f'score2 ({score2Name}) could not be exported from MuseScore', file=sys.stderr)
+                print(e, file=sys.stderr)
+                badArg2 = True
         fileName2: str = score2.name
         fileExt2: str = score2.suffix
 
-        if fileExt2 not in _getInputExtensionsList():
+        if not badArg2 and fileExt2 not in _getInputExtensionsList():
             print(f'score2 file extension ({fileExt2}) not supported by music21.', file=sys.stderr)
             badArg2 = True
 
@@ -468,3 +506,160 @@ def _getScoreLists(
         shortList.append(m21.stream.Score())
 
     return list1, list2
+
+
+def _serialize_diff_op(op: DiffOperation) -> dict[str, t.Any]:
+    return {
+        'op': op.name,
+        'edit_distance': op.edit_distance,
+        'obj1': str(op.obj1) if op.obj1 is not None else None,
+        'obj2': str(op.obj2) if op.obj2 is not None else None,
+    }
+
+
+@dataclass
+class ScoreDiffResult:
+    """Unified structured diff across musical notation and MuseScore proprietary layers."""
+
+    score1: str
+    score2: str
+    notation_cost: int | None = None
+    notation_ops: list[DiffOperation] = field(default_factory=list)
+    notation_text: str = ''
+    audio_diff: AudioDiffResult | None = None
+    meta_diff: MetaDiffResult | None = None
+
+    @property
+    def total_proprietary_changes(self) -> int:
+        total = 0
+        if self.audio_diff and self.audio_diff.available:
+            total += self.audio_diff.total_changes
+        if self.meta_diff and self.meta_diff.available:
+            total += self.meta_diff.total_changes
+        return total
+
+    @property
+    def has_changes(self) -> bool:
+        return bool((self.notation_cost or 0) > 0 or self.total_proprietary_changes > 0)
+
+    def to_dict(self) -> dict[str, t.Any]:
+        return {
+            'score1': self.score1,
+            'score2': self.score2,
+            'notation': {
+                'cost': self.notation_cost,
+                'num_ops': len(self.notation_ops),
+                'ops': [_serialize_diff_op(op) for op in self.notation_ops],
+                'text': self.notation_text,
+            },
+            'audio': self.audio_diff.to_dict() if self.audio_diff is not None else None,
+            'musescore_metadata': self.meta_diff.to_dict() if self.meta_diff is not None else None,
+        }
+
+    def format_text(self) -> str:
+        sections: list[str] = []
+        if self.notation_text:
+            sections.append(self.notation_text)
+        elif self.notation_cost == 0:
+            sections.append('Musical notation is identical (0 differences).')
+        if self.audio_diff is not None:
+            sections.append(format_audio_diff(self.audio_diff))
+        if self.meta_diff is not None:
+            sections.append(format_meta_diff(self.meta_diff))
+        return '\n\n'.join(sections)
+
+
+def diff_scores(
+    score1: str | Path | m21.stream.Score | m21.stream.Opus,
+    score2: str | Path | m21.stream.Score | m21.stream.Opus,
+    *,
+    out_path1: str | Path | None = None,
+    out_path2: str | Path | None = None,
+    visualize_diffs: bool = False,
+    detail: DetailLevel | int = DetailLevel.Default,
+    include_notation: bool = True,
+    include_audio: bool = True,
+    include_meta: bool = True,
+    cache_dir: str | Path | None = None,
+    force_parse: bool = True,
+    fix_first_file_syntax: bool = False,
+) -> ScoreDiffResult:
+    """Computes a unified diff across notation (including glissandos & instruments),
+    MuseScore `audiosettings.json`, and MuseScore `.mscx`/style/automation metadata.
+    """
+    name1 = str(score1) if isinstance(score1, (str, Path)) else 'score1'
+    name2 = str(score2) if isinstance(score2, (str, Path)) else 'score2'
+
+    p1 = Path(score1) if isinstance(score1, (str, Path)) else None
+    p2 = Path(score2) if isinstance(score2, (str, Path)) else None
+
+    audio_res: AudioDiffResult | None = None
+    meta_res: MetaDiffResult | None = None
+
+    if p1 is not None and p2 is not None:
+        arch1 = MuseScoreArchive.load(p1) if p1.suffix.lower() in MUSESCORE_EXTENSIONS else None
+        arch2 = MuseScoreArchive.load(p2) if p2.suffix.lower() in MUSESCORE_EXTENSIONS else None
+        if include_audio:
+            audio_res = diff_audio_settings(arch1 or p1, arch2 or p2)
+        if include_meta:
+            meta_res = diff_musescore_metadata(arch1 or p1, arch2 or p2)
+
+    notation_cost: int | None = None
+    all_ops: list[DiffOperation] = []
+    text_parts: list[str] = []
+
+    if include_notation:
+        converter21.register()
+        if visualize_diffs:
+            configure_music21_musescore()
+
+        target1: Path | m21.stream.Score | m21.stream.Opus = (
+            resolve_to_musicxml(p1, cache_dir=cache_dir) if p1 is not None else score1  # type: ignore[assignment]
+        )
+        target2: Path | m21.stream.Score | m21.stream.Opus = (
+            resolve_to_musicxml(p2, cache_dir=cache_dir) if p2 is not None else score2  # type: ignore[assignment]
+        )
+
+        sc_obj1 = (
+            m21.converter.parse(
+                target1,
+                forceSource=force_parse,
+                acceptSyntaxErrors=fix_first_file_syntax,
+            )
+            if isinstance(target1, Path)
+            else target1
+        )
+        sc_obj2 = (
+            m21.converter.parse(target2, forceSource=force_parse)
+            if isinstance(target2, Path)
+            else target2
+        )
+
+        scoreList1, scoreList2 = _getScoreLists(sc_obj1, sc_obj2)  # type: ignore[arg-type]
+        notation_cost = 0
+        for sc1, sc2 in zip(scoreList1, scoreList2):
+            ann1 = AnnScore(sc1, detail)
+            ann2 = AnnScore(sc2, detail)
+            ops, cost = Comparison.annotated_scores_diff(ann1, ann2)
+            notation_cost += cost
+            all_ops.extend(ops)
+
+            if cost != 0 and visualize_diffs:
+                Visualization.mark_diffs(sc1, sc2, ops)
+                Visualization.show_diffs(sc1, sc2, out_path1, out_path2)
+
+            txt = Visualization.get_text_output(
+                sc1, sc2, ops, score1Name=name1, score2Name=name2
+            )
+            if txt:
+                text_parts.append(txt)
+
+    return ScoreDiffResult(
+        score1=name1,
+        score2=name2,
+        notation_cost=notation_cost,
+        notation_ops=all_ops,
+        notation_text='\n'.join(text_parts),
+        audio_diff=audio_res,
+        meta_diff=meta_res,
+    )

@@ -12,22 +12,31 @@
 # Copyright:     (c) 2022-2025 Francesco Foscarin, Greg Chapman
 # License:       MIT, see LICENSE
 # ------------------------------------------------------------------------------
+import json
 import sys
 import argparse
+from pathlib import Path
 
 from musicdiff import DetailLevel
-from musicdiff import diff, diff_ml_training
+from musicdiff import (
+    diff,
+    diff_ml_training,
+    diff_scores,
+    MUSESCORE_EXTENSIONS,
+)
 
 # ------------------------------------------------------------------------------
 
 '''
     main entry point (parse arguments and do conversion)
 '''
-if __name__ == '__main__':
+def main() -> None:
     usage: str = '''python3 -m musicdiff [-h]
-                            [-i [{decoratednotesandrests,otherobjects,allobjects,style,metadata,voicing,notestaffposition,lyricidentifiers,notesandrests,beams,tremolos,ornaments,articulations,ties,slurs,glissandos,signatures,directions,barlines,staffdetails,chordsymbols,ottavas,arpeggios,lyrics} ...]]
-                            [-x [{decoratednotesandrests,otherobjects,allobjects,style,metadata,voicing,notestaffposition,lyricidentifiers,notesandrests,beams,tremolos,ornaments,articulations,ties,slurs,glissandossignatures,directions,barlines,staffdetails,chordsymbols,ottavas,arpeggios,lyrics} ...]]
-                            [-o [{visual,v,text,t,omrned,o} ...]]
+                            [-i [{decoratednotesandrests,otherobjects,allobjects,style,metadata,voicing,notestaffposition,lyricidentifiers,notesandrests,beams,tremolos,ornaments,articulations,ties,slurs,glissandos,instruments,signatures,directions,barlines,staffdetails,chordsymbols,ottavas,arpeggios,lyrics} ...]]
+                            [-x [{decoratednotesandrests,otherobjects,allobjects,style,metadata,voicing,notestaffposition,lyricidentifiers,notesandrests,beams,tremolos,ornaments,articulations,ties,slurs,glissandos,instruments,signatures,directions,barlines,staffdetails,chordsymbols,ottavas,arpeggios,lyrics} ...]]
+                            [-o [{visual,v,text,t,omrned,o,json,j} ...]]
+                            [--audio-only | --proprietary-only]
+                            [--no-audio] [--no-meta] [--cache-dir DIR]
                             [--fix_first_file_syntax]
                             file1 file2
 
@@ -37,8 +46,8 @@ usage: python3 -m musicdiff [-h]
                             --ground_truth_folder gtfolderpath
                             --predicted_folder predfolderpath
                             --output_folder outputfolderpath
-                            [-i [{decoratednotesandrests,otherobjects,allobjects,style,metadata,voicing,notestaffposition,lyricidentifiers,notesandrests,beams,tremolos,ornaments,articulations,ties,slurs,glissandos,signatures,directions,barlines,staffdetails,chordsymbols,ottavas,arpeggios,lyrics} ...]]
-                            [-x [{decoratednotesandrests,otherobjects,allobjects,style,metadata,voicing,notestaffposition,lyricidentifiers,notesandrests,beams,tremolos,ornaments,articulations,ties,slurs,glissandos,signatures,directions,barlines,staffdetails,chordsymbols,ottavas,arpeggios,lyrics} ...]]
+                            [-i [{decoratednotesandrests,otherobjects,allobjects,style,metadata,voicing,notestaffposition,lyricidentifiers,notesandrests,beams,tremolos,ornaments,articulations,ties,slurs,glissandos,instruments,signatures,directions,barlines,staffdetails,chordsymbols,ottavas,arpeggios,lyrics} ...]]
+                            [-x [{decoratednotesandrests,otherobjects,allobjects,style,metadata,voicing,notestaffposition,lyricidentifiers,notesandrests,beams,tremolos,ornaments,articulations,ties,slurs,glissandos,instruments,signatures,directions,barlines,staffdetails,chordsymbols,ottavas,arpeggios,lyrics} ...]]
 
 '''
     epilog: str = '''\
@@ -111,6 +120,7 @@ required:
             'ties',
             'slurs',
             'glissandos',
+            'instruments',
 
             'signatures',
             'directions',
@@ -146,6 +156,7 @@ required:
             'ties',
             'slurs',
             'glissandos',
+            'instruments',
 
             'signatures',
             'directions',
@@ -165,7 +176,7 @@ required:
             '--output',
             default=['visual'],
             nargs='*',
-            choices=['visual', 'v', 'text', 't', 'omrned', 'o'],
+            choices=['visual', 'v', 'text', 't', 'omrned', 'o', 'json', 'j'],
             help="'visual'/'v' is marked up scores, rendered to PDFs;"
             + " 'text'/'t' is diff-like, written to stdout;"
             + " 'omrned'/'o' is the OMR Normalized Edit Distance"
@@ -185,6 +196,45 @@ required:
             + ' corrected.  Note also that this currently only works for Humdrum'
             + ' **kern files.'
             + ' Cannot be specified with --ml_training_evaluation.'
+        )
+
+        parser.add_argument(
+            '--audio-only',
+            action='store_true',
+            default=False,
+            help='Compare only MuseScore audiosettings.json (skips MusicXML export and notation diff).'
+        )
+        parser.add_argument(
+            '--proprietary-only',
+            action='store_true',
+            default=False,
+            help='Compare only MuseScore proprietary layers (audiosettings, metadata, parts, style, automation).'
+        )
+        parser.add_argument(
+            '--no-audio',
+            action='store_true',
+            default=False,
+            help='Skip MuseScore audiosettings.json comparison.'
+        )
+        parser.add_argument(
+            '--no-meta',
+            action='store_true',
+            default=False,
+            help='Skip MuseScore .mscx metadata/style/automation comparison.'
+        )
+        parser.add_argument(
+            '--cache-dir',
+            type=Path,
+            default=None,
+            help='Directory to cache exported .musicxml files for .mscz/.mscx inputs.'
+        )
+        parser.add_argument(
+            '--pdf-out',
+            nargs=2,
+            metavar=('PDF1', 'PDF2'),
+            type=Path,
+            default=None,
+            help='Save marked-up visual diff PDFs to PDF1 and PDF2.'
         )
 
     parser.add_argument(
@@ -270,6 +320,8 @@ required:
                 detail |= DetailLevel.Slurs
             elif det == 'glissandos':
                 detail |= DetailLevel.Glissandos
+            elif det == 'instruments':
+                detail |= DetailLevel.Instruments
 
             # bits in the OtherObjects combo
             elif det == 'signatures':
@@ -328,6 +380,8 @@ required:
                 detail &= ~DetailLevel.Slurs
             elif det == 'glissandos':
                 detail &= ~DetailLevel.Glissandos
+            elif det == 'instruments':
+                detail &= ~DetailLevel.Instruments
 
             # bits in the OtherObjects combo
             elif det == 'signatures':
@@ -379,10 +433,43 @@ required:
         sys.exit(0)
 
     # files
-    visualize_diffs: bool = 'visual' in args.output or 'v' in args.output
+    visualize_diffs: bool = 'visual' in args.output or 'v' in args.output or args.pdf_out is not None
     print_text_output: bool = 'text' in args.output or 't' in args.output
     print_omr_ned_output: bool = 'omrned' in args.output or 'o' in args.output
+    print_json_output: bool = 'json' in args.output or 'j' in args.output
     fix_first_file_syntax: bool = args.fix_first_file_syntax is True
+
+    is_musescore_input = (
+        Path(args.file1).suffix.lower() in MUSESCORE_EXTENSIONS
+        or Path(args.file2).suffix.lower() in MUSESCORE_EXTENSIONS
+    )
+
+    if args.audio_only or args.proprietary_only or print_json_output or is_musescore_input:
+        include_notation = not (args.audio_only or args.proprietary_only)
+        include_audio = not args.no_audio
+        include_meta = (not args.no_meta) and (not args.audio_only)
+        out1, out2 = args.pdf_out if args.pdf_out is not None else (None, None)
+
+        res = diff_scores(
+            args.file1,
+            args.file2,
+            out_path1=out1,
+            out_path2=out2,
+            visualize_diffs=visualize_diffs and include_notation,
+            detail=detail,
+            include_notation=include_notation,
+            include_audio=include_audio,
+            include_meta=include_meta,
+            cache_dir=args.cache_dir,
+            fix_first_file_syntax=fix_first_file_syntax,
+        )
+        if print_json_output:
+            print(json.dumps(res.to_dict(), indent=2))
+        elif print_text_output or args.audio_only or args.proprietary_only:
+            print(res.format_text())
+        elif not res.has_changes:
+            print(f'Scores in {args.file1} and {args.file2} are identical.', file=sys.stderr)
+        return
 
     cost: int | None = diff(
         args.file1,
@@ -398,3 +485,7 @@ required:
         print('musicdiff failed.', file=sys.stderr)
     elif cost == 0:
         print(f'Scores in {args.file1} and {args.file2} are identical.', file=sys.stderr)
+
+
+if __name__ == '__main__':
+    main()

@@ -1594,6 +1594,24 @@ class Visualization:
         'slurdurationedit': 'wrong slur OMR-ED',
         'slurstyleedit': 'wrong slur OMR-ED',
 
+        'glissandoins': 'wrong glissando OMR-ED',
+        'glissandodel': 'wrong glissando OMR-ED',
+        'glissandocontentedit': 'wrong glissando OMR-ED',
+        'glissandosymboledit': 'wrong glissando OMR-ED',
+        'glissandoinfoedit': 'wrong glissando OMR-ED',
+        'glissandooffsetedit': 'wrong glissando OMR-ED',
+        'glissandodurationedit': 'wrong glissando OMR-ED',
+        'glissandostyleedit': 'wrong glissando OMR-ED',
+
+        'instrumentins': 'wrong instrument OMR-ED',
+        'instrumentdel': 'wrong instrument OMR-ED',
+        'instrumentcontentedit': 'wrong instrument OMR-ED',
+        'instrumentsymboledit': 'wrong instrument OMR-ED',
+        'instrumentinfoedit': 'wrong instrument OMR-ED',
+        'instrumentoffsetedit': 'wrong instrument OMR-ED',
+        'instrumentdurationedit': 'wrong instrument OMR-ED',
+        'instrumentstyleedit': 'wrong instrument OMR-ED',
+
         'ottavains': 'wrong ottava OMR-ED',
         'ottavadel': 'wrong ottava OMR-ED',
         'ottavacontentedit': 'wrong ottava OMR-ED',  # shouldn't happen; ottava is symbolic
